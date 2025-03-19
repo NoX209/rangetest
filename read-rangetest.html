@@ -5,7 +5,7 @@
 	<meta charset="UTF-8">
  	<meta name="viewport" content="width=device-width, initial-scale=1">
 
-	<title>Meshtastic rangetest.csv viewer (v2)</title>
+	<title>Meshtastic rangetest.csv viewer (v2.1)</title>
 	
 <style>
 	form {
@@ -40,7 +40,7 @@
 <body>
 
 <form id="upload" onsubmit="return false">
-	<h2>rangetest.csv viewer (v2)</h2>
+	<h2>rangetest.csv viewer (v2.1)</h2>
 
 	<p>This page is for viewing a rangetest.csv file saved from a Meshtastic Node. Tested with the file saved from the Android App, not sure about other clients. 
 
@@ -62,6 +62,12 @@
 	Types(s): <select name="types" id="selectTypes" multiple size=5 onchange="updateMap()"></select>
 	Senders(s): <select name="senders" id="selectSenders" multiple size=5 onchange="updateMap()"></select>
 	(hold ctrl to select multiple)
+	<br>
+	Visuals: <select name="visuals" id="selectVisuals" size=1 onchange="updateMap()">
+		<option selected>original</option>
+		<option>auto colored SNR</option>
+		<option>auto colored SNR (Route/Rangetest)</option>
+	</select>
 </form>
 <div id="map"></div>
 
@@ -104,7 +110,7 @@ function processCSV(text) {
   data = CSVToArray(text,',');
   header = data.shift();
 
-  renderMap({});
+  updateMap();
 }
 
 function updateMap() {
@@ -133,6 +139,15 @@ function updateMap() {
     for(let q=0;q<select.options.length;q++) {
       if (select.options[q].selected)
         filters['senders'].push(select.options[q].value);
+    }
+  }
+
+  select = document.getElementById('selectVisuals');
+  if (select.options.length > 0) {
+    filters['visuals'] = [];
+    for(let q=0;q<select.options.length;q++) {
+      if (select.options[q].selected)
+        filters['visuals'].push(select.options[q].value);
     }
   }
 
@@ -180,6 +195,9 @@ function renderMap(filters) {
 
 	nodes = {}; //for now, clear this each time. later will want to deduplicate mutliple files
 	
+	let [min_snr, max_snr] = findSnrRange(data)
+
+	let last_latlong;
 	data.forEach(function(line,index) {
 		let values = {};
 		line.forEach((v,i) => values[header[i]] = v);
@@ -193,6 +211,10 @@ function renderMap(filters) {
 		let slng = parseFloat(values['sender long']);
 		let rlat = parseFloat(values['rx lat']);
 		let rlng = parseFloat(values['rx long']);
+
+		let snr = parseInt(values['rx snr'])
+		let snr_percent = (snr-min_snr)/(max_snr-min_snr);
+		let snr_color = interpolate3('#ff0000','#ffff00','#00ff00',snr_percent)
 
 		///////////////////
 
@@ -228,10 +250,12 @@ function renderMap(filters) {
 				//todo update the title attached to the marker, now we know the name
 			} else {
 				nodes[key] = values; //??
+				let defaultColor = "#0000ff" //todo, pick from a colour pallet?
+				let markerColor = isOriginalVisual(filters) ? defaultColor : snr_color
 				L.circleMarker([slat,slng], {
 					radius: 6,
-					color: '#0000ff', //todo, pick from a colour pallet?
-					title:"Remote Node: " + values['sender name']+". At " + values['date'] + ' '+values['time']
+					color: markerColor,
+					title:"Remote Node: " + values['sender name']+" with SNR "+snr+". At " + values['date'] + ' '+values['time']
 				}).addTo(overlayMaps['Remote Nodes']).bindPopup(showTitlePopup);
 				bounds.extend([slat,slng]);
 				done++;
@@ -248,10 +272,12 @@ function renderMap(filters) {
 				//marker already exists, doesnt need adding again!
 			} else {
 				nodes[key] = values; //??
+				let defaultColor = "#ff0000"
+				let markerColor = isOriginalVisual(filters) ? defaultColor : snr_color
 				L.circleMarker([rlat,rlng], {
 					radius: 6,
-					color: '#ff0000',
-					title:"Self. At " + values['date'] + ' '+values['time'] //todo - doesnt work with circleMarker!
+					color: markerColor,
+					title:"Self with SNR "+snr+". At " + values['date'] + ' '+values['time'] //todo - doesnt work with circleMarker!
 				}).addTo(overlayMaps['Your Node Locations']).bindPopup(showTitlePopup);
 				bounds.extend([rlat,rlng]);
 				done++;
@@ -264,11 +290,30 @@ function renderMap(filters) {
 		//line joining the two
 
 		if (!isNaN(slat) && !isNaN(slng) && (slat!=0.0 || slng!=0.0) && !isNaN(rlat) && !isNaN(rlng) && (rlat!=0.0 || rlng!=0.0)) {
-			L.polyline([[slat,slng],[rlat,rlng]], {
-				color: '#0000ff',
-				weight: parseInt(values['hop limit'])+1,
-				title: values['date'] + ' '+values['time']
-			}).addTo(overlayMaps['Contacts']).bindPopup(showTitlePopup);
+
+			let defaultColor = "#0000ff"
+			let markerColor = isOriginalVisual(filters) ? defaultColor : snr_color
+
+			if (isColoredRouteVisual(filters)){
+				if(last_latlong){
+					L.polyline([last_latlong,[rlat,rlng]], {
+						color: markerColor,
+						weight: parseInt(values['hop limit'])+3,
+						title: values['date'] + ' '+values['time']
+					}).addTo(overlayMaps['Contacts']).bindPopup(showTitlePopup);
+
+					last_latlong = [rlat,rlng]
+				}
+				if(!last_latlong){
+					last_latlong = [rlat,rlng]
+				}
+			} else {
+				L.polyline([[slat,slng],[rlat,rlng]], {
+					color: markerColor,
+					weight: parseInt(values['hop limit'])+1,
+					title: values['date'] + ' '+values['time']
+				}).addTo(overlayMaps['Contacts']).bindPopup(showTitlePopup);
+			}
 		}
 
 		///////////////////
@@ -411,6 +456,69 @@ function CSVToArray(strData, strDelimiter) {
 
   // Return the parsed data.
   return (arrData);
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+
+function findSnrRange(data){
+	let min_snr = Number.POSITIVE_INFINITY;
+	let max_snr = Number.NEGATIVE_INFINITY;
+	data.forEach(function(line,index) {
+		let values = {};
+		line.forEach((v,i) => values[header[i]] = v);
+
+		if (!values['from'])
+			return; //usually am empty row at the end!
+
+		///////////////////
+
+		let snr = parseInt(values['rx snr'])
+		if(snr < min_snr){
+			min_snr = snr;
+		}
+		if(snr > max_snr){
+			max_snr = snr;
+		}
+	});
+	console.log("min SNR:"+min_snr+" max SNR:"+max_snr);
+	return [min_snr, max_snr]
+}
+
+function isOriginalVisual(filters){
+    return filters['visuals']=="original"
+}
+
+function isColoredRouteVisual(filters){
+    return filters['visuals']=="auto colored SNR (Route/Rangetest)"
+}
+
+function interpolate3(color1, color2, color3, percent) {
+    if(percent < 0.5){
+        return interpolate(color1, color2, percent*2)
+    }
+    return interpolate(color2, color3, (percent-.5)*2)
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//From: https://stackoverflow.com/a/76126221
+
+function interpolate(color1, color2, percent) {
+  // Convert the hex colors to RGB values
+  const r1 = parseInt(color1.substring(1, 3), 16);
+  const g1 = parseInt(color1.substring(3, 5), 16);
+  const b1 = parseInt(color1.substring(5, 7), 16);
+
+  const r2 = parseInt(color2.substring(1, 3), 16);
+  const g2 = parseInt(color2.substring(3, 5), 16);
+  const b2 = parseInt(color2.substring(5, 7), 16);
+
+  // Interpolate the RGB values
+  const r = Math.round(r1 + (r2 - r1) * percent);
+  const g = Math.round(g1 + (g2 - g1) * percent);
+  const b = Math.round(b1 + (b2 - b1) * percent);
+
+  // Convert the interpolated RGB values back to a hex color
+  return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
 </script>
